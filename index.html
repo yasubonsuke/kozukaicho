@@ -159,6 +159,11 @@
   border:1px solid #D9D2C0;background:#FDFCF9;color:#6B6557;}
 .kz .del-link{display:block;margin:8px 0 0 auto;padding:4px 2px;border:none;background:none;
   font-size:12px;color:#C43D2B;text-decoration:underline;}
+.kz .ocr-row{display:flex;align-items:center;gap:10px;padding:8px 16px 0;}
+.kz .ocr-btn{padding:8px 12px;border-radius:8px;border:1px solid #31518F;
+  background:#FDFCF9;color:#31518F;font-size:13px;flex:0 0 auto;}
+.kz .ocr-btn:disabled{opacity:.45;}
+.kz .ocr-status{font-size:11px;color:#6B6557;line-height:1.4;min-width:0;}
 
 .kz .calc-display{padding:2px 16px 8px;text-align:right;}
 .kz .calc-expr{min-height:17px;font-size:12px;color:#6B6557;}
@@ -199,6 +204,10 @@
 
 @media (prefers-reduced-motion: no-preference){
   .kz .chip,.kz .week-seg button,.kz nav button,.kz .key{transition:background .12s,color .12s;}
+  .kz #view.swipe-l{animation:kzSwL .18s ease;}
+  .kz #view.swipe-r{animation:kzSwR .18s ease;}
+  @keyframes kzSwL{from{opacity:.35;transform:translateX(16px);}to{opacity:1;transform:none;}}
+  @keyframes kzSwR{from{opacity:.35;transform:translateX(-16px);}to{opacity:1;transform:none;}}
 }
 </style>
 </head>
@@ -220,6 +229,7 @@
   </nav>
   <div id="panelRoot"></div>
   <div id="modalRoot"></div>
+  <input type="file" id="ocrFile" accept="image/*" capture="environment" style="display:none">
 </div>
 
 <script>
@@ -330,6 +340,73 @@ function reduceCalc(c, key){
   }
   return { ...c, cur, fresh: false };
 }
+function ocrZenToHan(s){
+  return String(s)
+    .replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/[，、]/g, ",")
+    .replace(/[．]/g, ".")
+    .replace(/[￥]/g, "¥");
+}
+function ocrNumsInLine(line){
+  const out = [];
+  const re = /([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)/g;
+  let m;
+  while ((m = re.exec(line))) {
+    const digits = m[1].replace(/[^0-9]/g, "");
+    if (digits.length >= 8) continue; /* 電話番号・日付・バーコード等 */
+    const v = parseInt(digits, 10);
+    if (isFinite(v) && v > 0) out.push(v);
+  }
+  return out;
+}
+const OCR_SKIP = /預|釣|現金|クレジ|カード|交通系|電子マネー|チャージ|ポイント|残高|税率|対象|値引|割引|TEL|電話|FAX|番号|会員|レジ|取引|[0-9]{4}[\/年]|[0-9]{1,2}:[0-9]{2}/;
+const OCR_TOTAL = /(合\s*計|ご?請\s*求|お?買\s*上\s*げ?\s*計|総額|総合計)/;
+const OCR_SUB = /小\s*計/;
+function parseReceiptText(text){
+  const lines = String(text || "").split(/\r?\n/).map(l => ocrZenToHan(l).trim()).filter(l => l.length > 0);
+  let amount = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (OCR_TOTAL.test(l) && !/預|釣|点数|個数/.test(l)) {
+      let ns = ocrNumsInLine(l);
+      if (ns.length === 0 && lines[i + 1] && !OCR_SKIP.test(lines[i + 1])) ns = ocrNumsInLine(lines[i + 1]);
+      if (ns.length) amount = ns[ns.length - 1];
+    }
+  }
+  if (!amount) {
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if (OCR_SUB.test(l) && !/点数|個数/.test(l)) {
+        let ns = ocrNumsInLine(l);
+        if (ns.length === 0 && lines[i + 1] && !OCR_SKIP.test(lines[i + 1])) ns = ocrNumsInLine(lines[i + 1]);
+        if (ns.length) amount = ns[ns.length - 1];
+      }
+    }
+  }
+  if (!amount) {
+    let best = 0;
+    lines.forEach(l => {
+      if (OCR_SKIP.test(l)) return;
+      ocrNumsInLine(l).forEach(v => { if (v <= 999999 && v > best) best = v; });
+    });
+    amount = best;
+  }
+  let store = "";
+  const bad = /領収|レシート|明細|御?買上|様|TEL|電話|FAX|〒|http|www|[0-9]{4}[\/年.-][0-9]{1,2}|^[-0-9\/.,:¥ ]+$/;
+  for (let i = 0; i < Math.min(5, lines.length); i++) {
+    const l = lines[i];
+    if (l.length < 2 || bad.test(l)) continue;
+    store = l.replace(/[*＊#＃]+/g, "").trim().slice(0, 20);
+    if (store) break;
+  }
+  return { amount: clampNum(amount || 0), store };
+}
+function nextWeekPos(m, w, dir){
+  let nw = w + dir, nm = m;
+  if (nw > 4) { if (nm >= 11) return null; nm++; nw = 0; }
+  if (nw < 0) { if (nm <= 0) return null; nm--; nw = 4; }
+  return { m: nm, w: nw };
+}
 /* PURE-END */
 
 const KEY = "kozukaicho_2026_v2";
@@ -373,12 +450,15 @@ const st = {
   confirmReset: false,
   io: null,
   ioMsg: "",
-  flash: ""
+  flash: "",
+  ocr: { busy: false, msg: "" }
 };
 let storageOK = false;
 let saveTimer = null;
 let flashTimer = null;
 let currentChips = [];
+let ocrToken = 0;
+let ocrWorker = null;
 
 /* ───────── 保存 ───────── */
 function initStorage(){
@@ -668,6 +748,7 @@ function panelHTML(){
     '<span class="panel-target"><b>'+targetLabel(p.t)+'</b>'+(p.edit!=null?' の記録を編集':' に追加')+'</span>'+
     '<button class="panel-x" data-close-panel aria-label="閉じる">✕</button></div>'+
     '<div class="memo-wrap"><input class="memo" id="memoInput" type="text" maxlength="40" placeholder="メモ（何に使ったか）" value="'+esc(p.memo)+'">'+chips+del+'</div>'+
+    ocrRowHTML()+
     '<div class="calc-display"><div class="calc-expr num">'+expr+'</div>'+
     '<div class="calc-val num"><span class="unit">¥</span>'+fmtN(Number(p.cur))+'</div></div>'+keys+'</div>';
 }
@@ -687,6 +768,8 @@ function modalHTML(){
     '<p>・行そのものをタップすると明細の一覧が開きます。記録をタップすれば金額・メモの修正や削除ができます。</p>'+
     '<p>・メモ欄の下には同じ分類で最近使ったメモが出るので、タップするだけで入力できます。</p>'+
     '<p>・グラフは1回タップするとその月・週の金額が下に表示され、同じ場所をもう一度タップすると入力画面へ進みます。</p>'+
+    '<p>・追加画面の「📷 レシート読取」でレシートを撮ると、合計金額と店名を自動で入れます（処理はすべて端末内・初回のみ約15MBの取得に通信が必要）。読み取りは完璧ではないので、確定前に金額を確認してください。</p>'+
+    '<p>・「週の支出」は画面を左右にスワイプすると週を移動できます（月をまたいで連続）。「生活費」「収入」のスワイプは月の移動です。</p>'+
     '<p>・データはこの端末（このアプリ）の中に自動保存されます。機種変更などに備えて、ときどき「書き出す」でバックアップを取っておくと安心です。</p>'+
     '<div class="io-sec"><div class="io-title">データの引き継ぎ・バックアップ</div>'+
     '<div class="io-btns"><button class="io-btn" data-export>書き出す</button>'+
@@ -733,6 +816,7 @@ function commit(t, fn){
 function openList(t){ st.flash=""; st.panel={t, mode:"list"}; renderView(); renderPanel(); scrollActiveRow(); }
 function openAddFor(t){
   st.flash="";
+  ocrToken++; st.ocr={busy:false, msg:""};
   st.panel={t, mode:"calc", edit:null, memo:"", acc:null, op:null, cur:"0", fresh:true, confirmDel:false};
   renderView(); renderPanel(); scrollActiveRow();
 }
@@ -740,11 +824,12 @@ function openEdit(i){
   const e=cellOf(st.data, st.panel.t)[i];
   if(!e) return;
   st.flash="";
+  ocrToken++; st.ocr={busy:false, msg:""};
   st.panel={t:st.panel.t, mode:"calc", edit:i, memo:e.n||"", acc:null, op:null, cur:String(e.a||0), fresh:true, confirmDel:false};
   renderPanel();
 }
-function backToList(){ st.panel={t:st.panel.t, mode:"list"}; renderPanel(); }
-function closePanel(){ st.panel=null; st.flash=""; renderView(); renderPanel(); }
+function backToList(){ ocrToken++; st.ocr={busy:false, msg:""}; st.panel={t:st.panel.t, mode:"list"}; renderPanel(); }
+function closePanel(){ ocrToken++; st.ocr={busy:false, msg:""}; st.panel=null; st.flash=""; renderView(); renderPanel(); }
 
 function onCalcKey(key){
   const p=st.panel;
@@ -818,11 +903,116 @@ function doImport(){
   }
 }
 
+/* ───────── レシート読取（端末内OCR） ───────── */
+function ocrRowHTML(){
+  return '<div class="ocr-row"><button class="ocr-btn" data-ocr'+(st.ocr.busy?' disabled':'')+'>📷 レシート読取</button>'+
+    '<span class="ocr-status" id="ocrStatus">'+esc(st.ocr.msg)+'</span></div>';
+}
+function ocrStatus(msg){
+  st.ocr.msg = msg;
+  const el = document.getElementById("ocrStatus");
+  if (el) el.textContent = msg;
+}
+function loadTesseract(){
+  return new Promise((res, rej) => {
+    if (window.Tesseract) return res();
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js";
+    s.onload = () => res();
+    s.onerror = () => rej(new Error("script"));
+    document.head.appendChild(s);
+  });
+}
+function ocrJpStatus(m){
+  if (!m || !m.status) return "";
+  const p = (m.progress != null) ? " " + Math.round(m.progress * 100) + "%" : "";
+  if (m.status.indexOf("recognizing") === 0) return "解析中…" + p;
+  if (m.status.indexOf("loading language") === 0) return "日本語データ取得中（初回のみ・約15MB）…" + p;
+  if (m.status.indexOf("loading tesseract") === 0 || m.status.indexOf("initializing") === 0) return "読み取りエンジン準備中…";
+  return "";
+}
+async function getOcrWorker(){
+  await loadTesseract();
+  if (ocrWorker) return ocrWorker;
+  ocrWorker = await Tesseract.createWorker("jpn", 1, {
+    logger: m => { const t = ocrJpStatus(m); if (t) ocrStatus(t); }
+  });
+  return ocrWorker;
+}
+function fileToCanvas(file){
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const maxSide = 1400;
+        const sc = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * sc));
+        const h = Math.max(1, Math.round(img.height * sc));
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        const cx = cv.getContext("2d");
+        cx.drawImage(img, 0, 0, w, h);
+        const im = cx.getImageData(0, 0, w, h);
+        const d = im.data;
+        for (let i = 0; i < d.length; i += 4) {
+          const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          const v = Math.max(0, Math.min(255, (g - 110) * 1.6 + 128));
+          d[i] = d[i + 1] = d[i + 2] = v;
+        }
+        cx.putImageData(im, 0, 0);
+        URL.revokeObjectURL(url);
+        res(cv);
+      } catch (e) { rej(e); }
+    };
+    img.onerror = rej;
+    img.src = url;
+  });
+}
+async function runOcr(file){
+  if (!st.panel || st.panel.mode !== "calc") return;
+  const token = ++ocrToken;
+  st.ocr = { busy: true, msg: "写真を準備中…" };
+  renderPanel();
+  try {
+    const cv = await fileToCanvas(file);
+    if (token !== ocrToken) return;
+    const worker = await getOcrWorker();
+    if (token !== ocrToken) return;
+    ocrStatus("解析中…");
+    const r = await worker.recognize(cv);
+    if (token !== ocrToken || !st.panel || st.panel.mode !== "calc") return;
+    const parsed = parseReceiptText(r && r.data ? r.data.text : "");
+    if (parsed.amount > 0) {
+      st.panel.cur = String(parsed.amount);
+      st.panel.fresh = true;
+      st.panel.acc = null;
+      st.panel.op = null;
+    }
+    if (parsed.store && !st.panel.memo.trim()) st.panel.memo = parsed.store;
+    st.ocr = {
+      busy: false,
+      msg: parsed.amount > 0
+        ? "読み取り: ¥" + fmtN(parsed.amount) + (parsed.store ? "／" + parsed.store : "") + "　違っていたら直してください"
+        : "金額を読み取れませんでした。手で入力してください"
+    };
+    renderPanel();
+  } catch (e) {
+    if (token !== ocrToken) return;
+    st.ocr = { busy: false, msg: "読み取りに失敗しました。初回は通信が必要です" };
+    renderPanel();
+  }
+}
+
 /* ───────── イベント ───────── */
 document.addEventListener("click", ev=>{
   const q=s=>ev.target.closest(s);
   let el;
   if((el=q("[data-key]"))){ onCalcKey(el.dataset.key); return; }
+  if(q("[data-ocr]")){
+    if(!st.ocr.busy){ const f=document.getElementById("ocrFile"); if(f) f.click(); }
+    return;
+  }
   if(q("[data-del]")){ onDelete(); return; }
   if((el=q("[data-chipi]"))){
     const mm=currentChips[+el.dataset.chipi];
@@ -905,7 +1095,59 @@ document.addEventListener("focusin", ev=>{
   }
 });
 
+/* ───────── スワイプで週・月を移動 ───────── */
+let swipeStart = null;
+function handleSwipe(dir){
+  if (st.tab === "weekly") {
+    const p = nextWeekPos(st.month, st.week, dir);
+    if (!p) return;
+    st.month = p.m; st.week = p.w;
+  } else if (st.tab === "living" || st.tab === "income") {
+    const m = st.month + dir;
+    if (m < 0 || m > 11) return;
+    st.month = m;
+  } else {
+    return;
+  }
+  renderView();
+  const v = document.getElementById("view");
+  if (v) {
+    v.classList.remove("swipe-l", "swipe-r");
+    void v.offsetWidth;
+    v.classList.add(dir > 0 ? "swipe-l" : "swipe-r");
+  }
+}
+document.addEventListener("touchstart", ev => {
+  swipeStart = null;
+  if (st.panel || st.help) return;
+  if (st.tab === "summary") return;
+  if (!ev.touches || ev.touches.length !== 1) return;
+  if (ev.target.closest && ev.target.closest(".month-scroll, .memo-chips, .dlist")) return;
+  swipeStart = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, t: Date.now() };
+}, { passive: true });
+document.addEventListener("touchend", ev => {
+  if (!swipeStart) return;
+  const s = swipeStart; swipeStart = null;
+  if (st.panel || st.help) return;
+  const c = ev.changedTouches && ev.changedTouches[0];
+  if (!c) return;
+  const dx = c.clientX - s.x, dy = c.clientY - s.y;
+  if (Date.now() - s.t > 600) return;
+  if (Math.abs(dx) < 60) return;
+  if (Math.abs(dy) > Math.abs(dx) * 0.6) return;
+  handleSwipe(dx < 0 ? 1 : -1);
+}, { passive: true });
+document.addEventListener("touchcancel", () => { swipeStart = null; }, { passive: true });
+
 /* ───────── 起動 ───────── */
+const ocrFileEl = document.getElementById("ocrFile");
+if (ocrFileEl) {
+  ocrFileEl.addEventListener("change", ev => {
+    const f = ev.target.files && ev.target.files[0];
+    ev.target.value = "";
+    if (f) runOcr(f);
+  });
+}
 initStorage();
 setSaveState(storageOK ? "保存済み" : "この端末では保存不可", storageOK);
 renderView();
