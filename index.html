@@ -164,6 +164,13 @@
   background:#FDFCF9;color:#31518F;font-size:13px;flex:0 0 auto;}
 .kz .ocr-btn:disabled{opacity:.45;}
 .kz .ocr-status{font-size:11px;color:#6B6557;line-height:1.4;min-width:0;}
+.kz .bk-banner{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  padding:8px 10px 8px 16px;font-size:12px;color:#6B6557;
+  background:#F1EADB;border-bottom:1px solid #D9D2C0;}
+.kz .bk-banner span{cursor:pointer;}
+.kz .bk-x{border:none;background:none;color:#6B6557;font-size:14px;padding:4px 8px;flex:0 0 auto;}
+.kz .io-restore{width:100%;margin-top:8px;}
+.kz .ver{font-size:10px;color:#C6BFAD;text-align:right;margin-top:10px;}
 
 .kz .calc-display{padding:2px 16px 8px;text-align:right;}
 .kz .calc-expr{min-height:17px;font-size:12px;color:#6B6557;}
@@ -202,12 +209,12 @@
 .kz .close{margin-top:10px;width:100%;padding:12px;border-radius:8px;
   border:none;background:#262420;color:#F5F1E8;font-size:14px;}
 
+.kz .swipe-wrap{overflow:hidden;touch-action:pan-y;}
+.kz .swipe-track{display:flex;width:300%;will-change:transform;transform:translate3d(-33.3333%,0,0);}
+.kz .swipe-pane{width:33.3333%;flex:0 0 33.3333%;min-width:0;align-self:flex-start;}
+
 @media (prefers-reduced-motion: no-preference){
   .kz .chip,.kz .week-seg button,.kz nav button,.kz .key{transition:background .12s,color .12s;}
-  .kz #view.swipe-l{animation:kzSwL .18s ease;}
-  .kz #view.swipe-r{animation:kzSwR .18s ease;}
-  @keyframes kzSwL{from{opacity:.35;transform:translateX(16px);}to{opacity:1;transform:none;}}
-  @keyframes kzSwR{from{opacity:.35;transform:translateX(-16px);}to{opacity:1;transform:none;}}
 }
 </style>
 </head>
@@ -220,6 +227,7 @@
       <button class="help-btn" data-help-open aria-label="使い方">？</button>
     </div>
   </header>
+  <div id="bkBanner"></div>
   <main id="mainEl"><div id="view"></div></main>
   <nav>
     <button data-tab="summary">まとめ</button>
@@ -407,9 +415,19 @@ function nextWeekPos(m, w, dir){
   if (nw < 0) { if (nm <= 0) return null; nm--; nw = 4; }
   return { m: nm, w: nw };
 }
+function entryCountAll(d){
+  let c = 0;
+  d.weekly.forEach(mn => mn.forEach(wk => wk.forEach(a => { c += a.length; })));
+  d.living.forEach(mn => mn.forEach(a => { c += a.length; }));
+  d.income.forEach(mn => mn.forEach(a => { c += a.length; }));
+  return c;
+}
 /* PURE-END */
 
 const KEY = "kozukaicho_2026_v2";
+const APP_VER = "1.5";
+const SNAP_KEY = KEY + "_prev";
+const META_KEY = KEY + "_meta";
 const COL = { ink:"#262420", inkSoft:"#6B6557", rule:"#D9D2C0", ai:"#31518F", aiSoft:"#E3E9F4", aiPale:"#A9B8D6", shu:"#C43D2B", asagi:"#4B93A3" };
 const CALC_KEYS = [
   ["AC","fn"],["⌫","fn"],["÷","op"],["×","op"],
@@ -451,7 +469,8 @@ const st = {
   io: null,
   ioMsg: "",
   flash: "",
-  ocr: { busy: false, msg: "" }
+  ocr: { busy: false, msg: "" },
+  confirmRestore: false
 };
 let storageOK = false;
 let saveTimer = null;
@@ -459,6 +478,8 @@ let flashTimer = null;
 let currentChips = [];
 let ocrToken = 0;
 let ocrWorker = null;
+let bkMeta = null;
+let bkDismissed = false;
 
 /* ───────── 保存 ───────── */
 function initStorage(){
@@ -476,6 +497,24 @@ function initStorage(){
       else if (p && p.weekly) st.data = migrateV1(p);
     }
   } catch (e) { /* 破損時は白紙 */ }
+  try {
+    const cur = localStorage.getItem(KEY) || "";
+    const curCnt = entryCountAll(st.data);
+    let prevCnt = -1;
+    const prevRaw = localStorage.getItem(SNAP_KEY);
+    if (prevRaw) {
+      try {
+        const pp = JSON.parse(prevRaw);
+        prevCnt = entryCountAll(pp && pp.v === 2 ? normalizeV2(pp) : migrateV1(pp || {}));
+      } catch (e2) { prevCnt = -1; }
+    }
+    /* 中身のある控えを、白紙データで上書きしない */
+    if (cur && (curCnt > 0 || prevCnt <= 0)) localStorage.setItem(SNAP_KEY, cur);
+  } catch (e) { /* noop */ }
+  try {
+    const m = JSON.parse(localStorage.getItem(META_KEY) || "null");
+    if (m && typeof m.t === "number" && typeof m.c === "number") bkMeta = m;
+  } catch (e) { /* noop */ }
 }
 function setSaveState(t, ok){
   const el = document.getElementById("saveState");
@@ -492,6 +531,29 @@ function scheduleSave(){
       setSaveState("保存済み", true);
     } catch (e) { setSaveState("保存できません", false); }
   }, 400);
+  renderBanner();
+}
+function markBackedUp(){
+  bkMeta = { t: Date.now(), c: entryCountAll(st.data) };
+  bkDismissed = false;
+  try { localStorage.setItem(META_KEY, JSON.stringify(bkMeta)); } catch (e) { /* noop */ }
+  renderBanner();
+}
+function bkNeeded(){
+  if (!storageOK || bkDismissed) return false;
+  const c = entryCountAll(st.data);
+  if (c <= 0) return false;
+  if (!bkMeta) return c >= 5;
+  const days = (Date.now() - bkMeta.t) / 86400000;
+  return (c - bkMeta.c) >= 10 || days >= 7;
+}
+function renderBanner(){
+  const el = document.getElementById("bkBanner");
+  if (!el) return;
+  el.innerHTML = bkNeeded()
+    ? '<div class="bk-banner"><span data-help-open>💾 バックアップ推奨：タップして「書き出す」からデータを控えておけます</span>'+
+      '<button class="bk-x" data-bk-dismiss aria-label="閉じる">✕</button></div>'
+    : "";
 }
 
 /* ───────── 共通 ───────── */
@@ -514,7 +576,7 @@ function smoothPref(){
 }
 function jumpToWeekInputs(){
   try {
-    const el = document.querySelector(".week-seg");
+    const el = document.querySelector("[data-cur] .week-seg") || document.querySelector(".week-seg");
     if (el) el.scrollIntoView({ block: "center", behavior: smoothPref() });
   } catch (e) { /* noop */ }
 }
@@ -775,18 +837,56 @@ function modalHTML(){
     '<div class="io-btns"><button class="io-btn" data-export>書き出す</button>'+
     '<button class="io-btn" data-import-open>読み込む</button></div>'+
     '<div class="io-note">書き出したテキストを保管しておけば、別の端末でもそのまま復元できます。読み込むと今のデータを置き換えます。</div>'+
-    ioArea+(st.ioMsg?'<div class="io-msg">'+esc(st.ioMsg)+'</div>':'')+'</div>'+
+    ioArea+(st.ioMsg?'<div class="io-msg">'+esc(st.ioMsg)+'</div>':'')+
+    '<button class="io-btn io-restore" data-restore>'+(st.confirmRestore?'もう一度タップで前回起動時のデータに戻します':'復元：前回起動時のデータに戻す')+'</button>'+
+    '</div>'+
     '<button class="danger" data-reset>'+(st.confirmReset?'もう一度タップすると消去します':'すべてのデータを消去して白紙に戻す')+'</button>'+
-    '<button class="close" data-modal-close>閉じる</button></div></div>';
+    '<button class="close" data-modal-close>閉じる</button>'+
+    '<div class="ver">バージョン '+APP_VER+'</div></div></div>';
 }
 
 /* ───────── 描画 ───────── */
+function viewHTMLFor(tab, m, w){
+  const sm = st.month, sw = st.week;
+  st.month = m;
+  if (w != null) st.week = w;
+  const h = tab === "weekly" ? viewWeekly() : tab === "living" ? viewLiving() : viewIncome();
+  st.month = sm; st.week = sw;
+  return h;
+}
+function paneHTML(dir){
+  if (dir === 0) return viewHTMLFor(st.tab, st.month, st.week);
+  if (st.tab === "weekly") {
+    const p = nextWeekPos(st.month, st.week, dir);
+    return p ? viewHTMLFor("weekly", p.m, p.w) : "";
+  }
+  const m = st.month + dir;
+  return (m >= 0 && m <= 11) ? viewHTMLFor(st.tab, m, null) : "";
+}
+function centerChips(){
+  document.querySelectorAll(".month-scroll").forEach(sc => {
+    const on = sc.querySelector(".chip.on");
+    if (!on) return;
+    try {
+      const r = on.getBoundingClientRect(), rc = sc.getBoundingClientRect();
+      sc.scrollLeft += (r.left + r.width / 2) - (rc.left + rc.width / 2);
+    } catch (e) { /* noop */ }
+  });
+}
 function renderView(){
-  const v = st.tab==="summary"?viewSummary():st.tab==="weekly"?viewWeekly():st.tab==="living"?viewLiving():viewIncome();
-  document.getElementById("view").innerHTML=v;
+  const view = document.getElementById("view");
+  if (st.tab === "summary") {
+    view.innerHTML = viewSummary();
+  } else {
+    view.innerHTML =
+      '<div class="swipe-wrap"><div class="swipe-track" id="swipeTrack">'+
+      '<div class="swipe-pane">'+paneHTML(-1)+'</div>'+
+      '<div class="swipe-pane" data-cur>'+paneHTML(0)+'</div>'+
+      '<div class="swipe-pane">'+paneHTML(1)+'</div>'+
+      '</div></div>';
+  }
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on", b.dataset.tab===st.tab));
-  const on=document.querySelector(".month-scroll .chip.on");
-  if(on){ try{ on.scrollIntoView({block:"nearest", inline:"center"}); }catch(e){} }
+  centerChips();
   updatePad();
 }
 function renderPanel(){
@@ -865,9 +965,25 @@ function onDelete(){
   showFlash("削除しました");
 }
 
-function doExport(){
+async function doExport(){
   const text=JSON.stringify({v:2, weekly:st.data.weekly, living:st.data.living, income:st.data.income});
+  let shared=false;
+  try{
+    if(navigator.canShare && typeof File!=="undefined"){
+      const f=new File([text], "kozukaicho-backup.txt", {type:"text/plain"});
+      if(navigator.canShare({files:[f]})){
+        await navigator.share({files:[f], title:"小遣い帳バックアップ"});
+        shared=true;
+      }
+    }
+  }catch(e){ /* キャンセル・非対応時は下のコピー手段へ */ }
   st.io={mode:"export", text};
+  markBackedUp();
+  if(shared){
+    st.ioMsg="共有しました。「ファイルに保存」やメモに入れておくと安心です";
+    renderModal();
+    return;
+  }
   st.ioMsg="";
   renderModal();
   try{
@@ -896,7 +1012,7 @@ function doImport(){
     st.io=null;
     st.ioMsg="読み込みました。今のデータを置き換えています";
     scheduleSave();
-    renderView(); renderPanel(); renderModal();
+    renderView(); renderPanel(); renderModal(); renderBanner();
   }catch(e){
     st.ioMsg="読み込めませんでした。書き出したテキストを丸ごと貼り付けてください";
     renderModal();
@@ -1069,8 +1185,28 @@ document.addEventListener("click", ev=>{
   if((el=q("[data-month]"))){ st.month=+el.dataset.month; st.panel=null; renderView(); renderPanel(); return; }
   if((el=q("[data-week]"))){ st.week=+el.dataset.week; st.panel=null; renderView(); renderPanel(); return; }
   if((el=q("nav button[data-tab]"))){ st.tab=el.dataset.tab; st.panel=null; renderView(); renderPanel(); return; }
-  if(q("[data-help-open]")){ st.help=true; st.confirmReset=false; st.io=null; st.ioMsg=""; renderModal(); return; }
-  if(q("[data-modal-close]")){ st.help=false; st.confirmReset=false; st.io=null; st.ioMsg=""; renderModal(); return; }
+  if(q("[data-help-open]")){ st.help=true; st.confirmReset=false; st.confirmRestore=false; st.io=null; st.ioMsg=""; renderModal(); return; }
+  if(q("[data-modal-close]")){ st.help=false; st.confirmReset=false; st.confirmRestore=false; st.io=null; st.ioMsg=""; renderModal(); return; }
+  if(q("[data-bk-dismiss]")){ bkDismissed=true; renderBanner(); return; }
+  if(q("[data-restore]")){
+    if(!st.confirmRestore){ st.confirmRestore=true; renderModal(); return; }
+    st.confirmRestore=false;
+    try{
+      const raw=localStorage.getItem(SNAP_KEY);
+      if(raw){
+        const p=JSON.parse(raw);
+        if(p && p.v===2) st.data=normalizeV2(p);
+        else if(p && p.weekly) st.data=migrateV1(p);
+        scheduleSave();
+        st.ioMsg="前回起動時のデータに戻しました";
+        renderView(); renderPanel();
+      }else{
+        st.ioMsg="復元できる控えが見つかりません";
+      }
+    }catch(e){ st.ioMsg="復元に失敗しました"; }
+    renderModal(); renderBanner();
+    return;
+  }
   if(q("[data-export]")){ doExport(); return; }
   if(q("[data-import-open]")){ st.io={mode:"import", text:""}; st.ioMsg=""; renderModal(); return; }
   if(q("[data-import-run]")){ doImport(); return; }
@@ -1082,7 +1218,7 @@ document.addEventListener("click", ev=>{
     renderView(); renderPanel(); renderModal();
     return;
   }
-  if(ev.target.id==="modalBg"){ st.help=false; st.confirmReset=false; st.io=null; st.ioMsg=""; renderModal(); return; }
+  if(ev.target.id==="modalBg"){ st.help=false; st.confirmReset=false; st.confirmRestore=false; st.io=null; st.ioMsg=""; renderModal(); return; }
 });
 
 document.addEventListener("input", ev=>{
@@ -1095,49 +1231,108 @@ document.addEventListener("focusin", ev=>{
   }
 });
 
-/* ───────── スワイプで週・月を移動 ───────── */
-let swipeStart = null;
-function handleSwipe(dir){
+/* ───────── スワイプで週・月を移動（指に追従） ───────── */
+let drag = null;
+let suppressClick = false;
+function periodExists(dir){
+  if (st.tab === "weekly") return !!nextWeekPos(st.month, st.week, dir);
+  const m = st.month + dir;
+  return m >= 0 && m <= 11;
+}
+function applyPeriod(dir){
   if (st.tab === "weekly") {
     const p = nextWeekPos(st.month, st.week, dir);
-    if (!p) return;
-    st.month = p.m; st.week = p.w;
-  } else if (st.tab === "living" || st.tab === "income") {
-    const m = st.month + dir;
-    if (m < 0 || m > 11) return;
-    st.month = m;
+    if (p) { st.month = p.m; st.week = p.w; }
   } else {
-    return;
+    const m = st.month + dir;
+    if (m >= 0 && m <= 11) st.month = m;
   }
   renderView();
-  const v = document.getElementById("view");
-  if (v) {
-    v.classList.remove("swipe-l", "swipe-r");
-    void v.offsetWidth;
-    v.classList.add(dir > 0 ? "swipe-l" : "swipe-r");
-  }
 }
-document.addEventListener("touchstart", ev => {
-  swipeStart = null;
+function swipeTrackEl(){ return document.getElementById("swipeTrack"); }
+document.getElementById("mainEl").addEventListener("touchstart", ev => {
+  drag = null;
   if (st.panel || st.help) return;
   if (st.tab === "summary") return;
   if (!ev.touches || ev.touches.length !== 1) return;
-  if (ev.target.closest && ev.target.closest(".month-scroll, .memo-chips, .dlist")) return;
-  swipeStart = { x: ev.touches[0].clientX, y: ev.touches[0].clientY, t: Date.now() };
+  if (ev.target.closest && ev.target.closest(".month-scroll, .memo-chips, .dlist, input, textarea")) return;
+  const t = swipeTrackEl();
+  if (!t) return;
+  drag = {
+    x: ev.touches[0].clientX, y: ev.touches[0].clientY,
+    dx: 0, mode: "pending",
+    w: (t.parentElement && t.parentElement.clientWidth) || window.innerWidth,
+    canPrev: periodExists(-1), canNext: periodExists(1),
+    lastX: ev.touches[0].clientX, lastT: Date.now(), vx: 0
+  };
 }, { passive: true });
-document.addEventListener("touchend", ev => {
-  if (!swipeStart) return;
-  const s = swipeStart; swipeStart = null;
-  if (st.panel || st.help) return;
-  const c = ev.changedTouches && ev.changedTouches[0];
-  if (!c) return;
-  const dx = c.clientX - s.x, dy = c.clientY - s.y;
-  if (Date.now() - s.t > 600) return;
-  if (Math.abs(dx) < 60) return;
-  if (Math.abs(dy) > Math.abs(dx) * 0.6) return;
-  handleSwipe(dx < 0 ? 1 : -1);
+document.getElementById("mainEl").addEventListener("touchmove", ev => {
+  if (!drag) return;
+  const tc = ev.touches[0];
+  const dx = tc.clientX - drag.x, dy = tc.clientY - drag.y;
+  if (drag.mode === "pending") {
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+    drag.mode = Math.abs(dx) > Math.abs(dy) ? "h" : "v";
+  }
+  if (drag.mode !== "h") return;
+  ev.preventDefault();
+  let d = dx;
+  if ((d > 0 && !drag.canPrev) || (d < 0 && !drag.canNext)) d *= 0.3;
+  drag.dx = d;
+  const now = Date.now();
+  drag.vx = (tc.clientX - drag.lastX) / Math.max(1, now - drag.lastT);
+  drag.lastX = tc.clientX; drag.lastT = now;
+  const t = swipeTrackEl();
+  if (t) {
+    t.style.transition = "none";
+    t.style.transform = "translate3d(calc(-33.3333% + " + d + "px),0,0)";
+  }
+}, { passive: false });
+function endDrag(){
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (d.mode !== "h") return;
+  suppressClick = Math.abs(d.dx) > 10;
+  const t = swipeTrackEl();
+  if (!t) return;
+  const commit = d.w * 0.28;
+  let dir = 0;
+  if ((d.dx <= -commit || (d.vx < -0.45 && d.dx < -24)) && d.canNext) dir = 1;
+  else if ((d.dx >= commit || (d.vx > 0.45 && d.dx > 24)) && d.canPrev) dir = -1;
+  if (smoothPref() === "auto") {
+    if (dir !== 0) applyPeriod(dir);
+    else { t.style.transition = "none"; t.style.transform = "translate3d(-33.3333%,0,0)"; }
+    return;
+  }
+  const target = dir === 1 ? "-66.6666%" : dir === -1 ? "0%" : "-33.3333%";
+  t.style.transition = "transform 0.26s cubic-bezier(.22,.61,.36,1)";
+  requestAnimationFrame(() => { t.style.transform = "translate3d(" + target + ",0,0)"; });
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    if (dir !== 0) applyPeriod(dir);
+    else { t.style.transition = "none"; t.style.transform = "translate3d(-33.3333%,0,0)"; }
+  };
+  t.addEventListener("transitionend", finish, { once: true });
+  setTimeout(finish, 380);
+}
+document.getElementById("mainEl").addEventListener("touchend", endDrag, { passive: true });
+document.getElementById("mainEl").addEventListener("touchcancel", () => {
+  const t = swipeTrackEl();
+  if (drag && drag.mode === "h" && t) {
+    t.style.transition = "none";
+    t.style.transform = "translate3d(-33.3333%,0,0)";
+  }
+  drag = null;
 }, { passive: true });
-document.addEventListener("touchcancel", () => { swipeStart = null; }, { passive: true });
+document.addEventListener("click", ev => {
+  if (suppressClick) {
+    suppressClick = false;
+    ev.stopPropagation();
+    ev.preventDefault();
+  }
+}, true);
 
 /* ───────── 起動 ───────── */
 const ocrFileEl = document.getElementById("ocrFile");
@@ -1153,6 +1348,7 @@ setSaveState(storageOK ? "保存済み" : "この端末では保存不可", stor
 renderView();
 renderPanel();
 renderModal();
+renderBanner();
 
 if("serviceWorker" in navigator && location.protocol==="https:"){
   try{ navigator.serviceWorker.register("./sw.js"); }catch(e){ /* noop */ }
