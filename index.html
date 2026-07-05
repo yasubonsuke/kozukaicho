@@ -164,6 +164,10 @@
   background:#FDFCF9;color:#31518F;font-size:13px;flex:0 0 auto;}
 .kz .ocr-btn:disabled{opacity:.45;}
 .kz .ocr-status{font-size:11px;color:#6B6557;line-height:1.4;min-width:0;}
+.kz .ocr-move-wrap{padding:8px 16px 0;}
+.kz .ocr-move{width:100%;padding:10px;border-radius:8px;border:1px solid #C6D2E8;
+  background:#E3E9F4;color:#31518F;font-size:13px;font-weight:600;}
+.kz .ddate{font-size:11px;color:#6B6557;margin-left:8px;flex:0 0 auto;}
 .kz .bk-banner{display:flex;justify-content:space-between;align-items:center;gap:8px;
   padding:8px 10px 8px 16px;font-size:12px;color:#6B6557;
   background:#F1EADB;border-bottom:1px solid #D9D2C0;}
@@ -263,7 +267,11 @@ function clampNum(n){
   return Math.min(999999999, Math.max(0, n));
 }
 function cleanEntry(e){
-  return { a: clampNum(+((e || {}).a) || 0), n: String((e || {}).n || "").slice(0, 40) };
+  const o = e || {};
+  const out = { a: clampNum(+o.a || 0), n: String(o.n || "").slice(0, 40) };
+  const d = String(o.d || "");
+  if (/^20[0-9]{2}-[0-9]{2}-[0-9]{2}$/.test(d)) out.d = d;
+  return out;
 }
 function cellSum(arr){ return (arr || []).reduce((s, e) => s + (+e.a || 0), 0); }
 function numToEntries(n){
@@ -422,10 +430,41 @@ function entryCountAll(d){
   d.income.forEach(mn => mn.forEach(a => { c += a.length; }));
   return c;
 }
+function dateToFiscal(y, mo, da){
+  const t = new Date(y, mo - 1, da).getTime();
+  const s = new Date(2026, 3, 1).getTime();
+  const e = new Date(2027, 2, 31, 23, 59, 59).getTime();
+  if (!(t >= s && t <= e)) return null;
+  return { m: mo >= 4 ? mo - 4 : mo + 8, w: Math.min(4, Math.floor((da - 1) / 7)) };
+}
+function parseReceiptDate(text){
+  const check = (y, mo, da) => {
+    if (y < 2020 || y > 2099 || mo < 1 || mo > 12 || da < 1 || da > 31) return null;
+    const dt = new Date(y, mo - 1, da);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== da) return null;
+    const p2 = n => (n < 10 ? "0" : "") + n;
+    return { y: y, mo: mo, da: da, iso: y + "-" + p2(mo) + "-" + p2(da) };
+  };
+  const lines = String(text || "").split(/\r?\n/).map(l => ocrZenToHan(l));
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (/期限|有効|EXP/i.test(l)) continue;
+    let m, r;
+    m = l.match(/(令和|R|Ｒ)\s*([0-9]{1,2})[年.\-\/]\s*([0-9]{1,2})[月.\-\/]\s*([0-9]{1,2})日?/);
+    if (m) { r = check(2018 + +m[2], +m[3], +m[4]); if (r) return r; }
+    m = l.match(/(20[0-9]{2})[年.\-\/]\s*([0-9]{1,2})[月.\-\/]\s*([0-9]{1,2})/);
+    if (m) { r = check(+m[1], +m[2], +m[3]); if (r) return r; }
+    m = l.match(/(^|[^0-9])([2-3][0-9])[\/.\-]([0-9]{1,2})[\/.\-]([0-9]{1,2})([^0-9]|$)/);
+    if (m) { r = check(2000 + +m[2], +m[3], +m[4]); if (r) return r; }
+    m = l.match(/([0-9]{1,2})月\s*([0-9]{1,2})日/);
+    if (m) { const mo = +m[1]; r = check(mo >= 4 ? 2026 : 2027, mo, +m[2]); if (r) return r; }
+  }
+  return null;
+}
 /* PURE-END */
 
 const KEY = "kozukaicho_2026_v2";
-const APP_VER = "1.5";
+const APP_VER = "1.6";
 const SNAP_KEY = KEY + "_prev";
 const META_KEY = KEY + "_meta";
 const COL = { ink:"#262420", inkSoft:"#6B6557", rule:"#D9D2C0", ai:"#31518F", aiSoft:"#E3E9F4", aiPale:"#A9B8D6", shu:"#C43D2B", asagi:"#4B93A3" };
@@ -444,6 +483,10 @@ function yen(n){
   return fmtN(n);
 }
 const cls = n => (n < 0 ? "neg" : "pos");
+function fmtD(d){
+  const m = /^20[0-9]{2}-([0-9]{2})-([0-9]{2})$/.exec(String(d || ""));
+  return m ? (+m[1]) + "/" + (+m[2]) : "";
+}
 function esc(s){
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
 }
@@ -778,6 +821,7 @@ function panelHTML(){
       entries.forEach((e,i)=>{
         list+='<button class="ditem" data-entry="'+i+'">'+
           '<span class="dmemo'+(e.n?'':' none')+'">'+(e.n?esc(e.n):'メモなし')+'</span>'+
+          (e.d?'<span class="ddate num">'+fmtD(e.d)+'</span>':'')+
           '<span class="damt num">¥'+fmtN(e.a)+'</span><span class="dedit">編集</span></button>';
       });
       list+='</div>';
@@ -830,7 +874,7 @@ function modalHTML(){
     '<p>・行そのものをタップすると明細の一覧が開きます。記録をタップすれば金額・メモの修正や削除ができます。</p>'+
     '<p>・メモ欄の下には同じ分類で最近使ったメモが出るので、タップするだけで入力できます。</p>'+
     '<p>・グラフは1回タップするとその月・週の金額が下に表示され、同じ場所をもう一度タップすると入力画面へ進みます。</p>'+
-    '<p>・追加画面の「📷 レシート読取」でレシートを撮ると、合計金額と店名を自動で入れます（処理はすべて端末内・初回のみ約15MBの取得に通信が必要）。読み取りは完璧ではないので、確定前に金額を確認してください。</p>'+
+    '<p>・追加画面の「📷 レシート読取」でレシートを撮ると、合計金額・店名・日付を自動で読み取ります（処理はすべて端末内・初回のみ約15MBの取得に通信が必要）。日付が今の週や月と違うときは、記録先の変更をワンタップで提案します。読み取りは完璧ではないので、確定前に確認してください。</p>'+
     '<p>・「週の支出」は画面を左右にスワイプすると週を移動できます（月をまたいで連続）。「生活費」「収入」のスワイプは月の移動です。</p>'+
     '<p>・データはこの端末（このアプリ）の中に自動保存されます。機種変更などに備えて、ときどき「書き出す」でバックアップを取っておくと安心です。</p>'+
     '<div class="io-sec"><div class="io-title">データの引き継ぎ・バックアップ</div>'+
@@ -917,7 +961,7 @@ function openList(t){ st.flash=""; st.panel={t, mode:"list"}; renderView(); rend
 function openAddFor(t){
   st.flash="";
   ocrToken++; st.ocr={busy:false, msg:""};
-  st.panel={t, mode:"calc", edit:null, memo:"", acc:null, op:null, cur:"0", fresh:true, confirmDel:false};
+  st.panel={t, mode:"calc", edit:null, memo:"", acc:null, op:null, cur:"0", fresh:true, confirmDel:false, ocrDate:null};
   renderView(); renderPanel(); scrollActiveRow();
 }
 function openEdit(i){
@@ -925,7 +969,7 @@ function openEdit(i){
   if(!e) return;
   st.flash="";
   ocrToken++; st.ocr={busy:false, msg:""};
-  st.panel={t:st.panel.t, mode:"calc", edit:i, memo:e.n||"", acc:null, op:null, cur:String(e.a||0), fresh:true, confirmDel:false};
+  st.panel={t:st.panel.t, mode:"calc", edit:i, memo:e.n||"", acc:null, op:null, cur:String(e.a||0), fresh:true, confirmDel:false, ocrDate:null};
   renderPanel();
 }
 function backToList(){ ocrToken++; st.ocr={busy:false, msg:""}; st.panel={t:st.panel.t, mode:"list"}; renderPanel(); }
@@ -938,15 +982,24 @@ function onCalcKey(key){
     const v = p.op!=null ? clampEval(p.acc, p.op, Number(p.cur)) : clampNum(Number(p.cur));
     const memo = p.memo.trim().slice(0,40);
     const t=p.t;
+    const scanD = p.ocrDate || null;
     if(p.edit==null){
       if(v===0 && !memo){ backToList(); return; }
-      commit(t, arr=>arr.push({a:v, n:memo}));
+      commit(t, arr=>{ const e={a:v, n:memo}; if(scanD) e.d=scanD; arr.push(e); });
       showFlash("追加しました");
     }else{
       const idx=p.edit;
-      commit(t, arr=>{ if(arr[idx]) arr[idx]={a:v, n:memo}; });
+      commit(t, arr=>{
+        if(arr[idx]){
+          const keep = scanD || arr[idx].d;
+          const e={a:v, n:memo};
+          if(keep) e.d=keep;
+          arr[idx]=e;
+        }
+      });
       showFlash("保存しました");
     }
+    st.ocr={busy:false, msg:""};
     st.panel={t, mode:"list"};
     renderView(); renderPanel();
     return;
@@ -1021,8 +1074,12 @@ function doImport(){
 
 /* ───────── レシート読取（端末内OCR） ───────── */
 function ocrRowHTML(){
-  return '<div class="ocr-row"><button class="ocr-btn" data-ocr'+(st.ocr.busy?' disabled':'')+'>📷 レシート読取</button>'+
+  let h = '<div class="ocr-row"><button class="ocr-btn" data-ocr'+(st.ocr.busy?' disabled':'')+'>📷 レシート読取</button>'+
     '<span class="ocr-status" id="ocrStatus">'+esc(st.ocr.msg)+'</span></div>';
+  if (st.ocr.move && st.panel && st.panel.edit == null) {
+    h += '<div class="ocr-move-wrap"><button class="ocr-move" data-ocr-move>📅 記録先を '+esc(st.ocr.move.label)+' に変更する</button></div>';
+  }
+  return h;
 }
 function ocrStatus(msg){
   st.ocr.msg = msg;
@@ -1098,7 +1155,9 @@ async function runOcr(file){
     ocrStatus("解析中…");
     const r = await worker.recognize(cv);
     if (token !== ocrToken || !st.panel || st.panel.mode !== "calc") return;
-    const parsed = parseReceiptText(r && r.data ? r.data.text : "");
+    const txt = r && r.data ? r.data.text : "";
+    const parsed = parseReceiptText(txt);
+    const pd = parseReceiptDate(txt);
     if (parsed.amount > 0) {
       st.panel.cur = String(parsed.amount);
       st.panel.fresh = true;
@@ -1106,11 +1165,26 @@ async function runOcr(file){
       st.panel.op = null;
     }
     if (parsed.store && !st.panel.memo.trim()) st.panel.memo = parsed.store;
+    if (pd) st.panel.ocrDate = pd.iso;
+    let move = null;
+    if (pd && st.panel.edit == null) {
+      const f = dateToFiscal(pd.y, pd.mo, pd.da);
+      if (f) {
+        const cur = st.panel.t;
+        if (cur.kind === "weekly" && (f.m !== cur.m || f.w !== cur.w)) {
+          move = { t: { kind: "weekly", m: f.m, w: f.w, c: cur.c }, label: MONTHS[f.m] + " " + WEEKS[f.w] };
+        } else if ((cur.kind === "living" || cur.kind === "income") && f.m !== cur.m) {
+          move = { t: { kind: cur.kind, m: f.m, c: cur.c }, label: MONTHS[f.m] };
+        }
+      }
+    }
+    const dstr = pd ? "　日付 " + pd.mo + "/" + pd.da : "";
     st.ocr = {
       busy: false,
+      move: move,
       msg: parsed.amount > 0
-        ? "読み取り: ¥" + fmtN(parsed.amount) + (parsed.store ? "／" + parsed.store : "") + "　違っていたら直してください"
-        : "金額を読み取れませんでした。手で入力してください"
+        ? "読み取り: ¥" + fmtN(parsed.amount) + (parsed.store ? "／" + parsed.store : "") + dstr + "　違っていたら直してください"
+        : "金額を読み取れませんでした。手で入力してください" + dstr
     };
     renderPanel();
   } catch (e) {
@@ -1127,6 +1201,17 @@ document.addEventListener("click", ev=>{
   if((el=q("[data-key]"))){ onCalcKey(el.dataset.key); return; }
   if(q("[data-ocr]")){
     if(!st.ocr.busy){ const f=document.getElementById("ocrFile"); if(f) f.click(); }
+    return;
+  }
+  if(q("[data-ocr-move]")){
+    if(st.panel && st.panel.mode==="calc" && st.panel.edit==null && st.ocr.move){
+      const mv = st.ocr.move;
+      st.panel = { ...st.panel, t: mv.t };
+      st.month = mv.t.m;
+      if (mv.t.kind === "weekly") st.week = mv.t.w;
+      st.ocr = { busy:false, msg:"記録先を "+mv.label+" に変更しました", move:null };
+      renderView(); renderPanel(); scrollActiveRow();
+    }
     return;
   }
   if(q("[data-del]")){ onDelete(); return; }
