@@ -378,11 +378,14 @@ function ocrNumsInLine(line){
   }
   return out;
 }
-const OCR_SKIP = /預|釣|現金|クレジ|カード|交通系|電子マネー|チャージ|ポイント|残高|税率|対象|値引|割引|TEL|電話|FAX|番号|会員|レジ|取引|[0-9]{4}[\/年]|[0-9]{1,2}:[0-9]{2}/;
-const OCR_TOTAL = /([合台舎含]\s*[計訂針斗]|ご?[請清]\s*求|お?買\s*上\s*げ?\s*計|総\s*額)/;
+const OCR_SKIP = /預|釣|現金|クレジ|カード|交通系|電子マネー|チャージ|ポイント|残高|税率|対象|タイショウ|値引|割引|TEL|電話|FAX|番号|会員|レジ|レシート|取引|N[oO][.:：]?\s*[0-9]|[0-9]{4}[\/年]|[0-9]{1,2}:[0-9]{2}/;
+const OCR_TOTAL = /([合台舎含倉会]\s*[計訂針斗]|ご?[請清]\s*求|お?買\s*上\s*げ?\s*計|総\s*額)/;
 const OCR_SUB = /[小水]\s*[計訂]/;
+function fixKanji(s){
+  return String(s).replace(/言\s*[十†]/g, "計");
+}
 function parseReceiptText(text){
-  const lines = String(text || "").split(/\r?\n/).map(l => ocrZenToHan(l).trim()).filter(l => l.length > 0);
+  const lines = String(text || "").split(/\r?\n/).map(l => fixKanji(ocrZenToHan(l)).trim()).filter(l => l.length > 0);
   let amount = 0;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
@@ -480,7 +483,7 @@ function bestNumberFromDigits(text){
   return best;
 }
 function findTotalLineIndex(texts){
-  const ls = texts.map(t => ocrZenToHan(String(t || "")));
+  const ls = texts.map(t => fixKanji(ocrZenToHan(String(t || ""))));
   let hit = null;
   for (let i = 0; i < ls.length; i++) {
     const l = ls[i];
@@ -557,10 +560,52 @@ function findBrightCrop(gray, w, h){
   const x = Math.max(0, cr.s - pad), y = Math.max(0, rr.s - pad);
   return { x: x, y: y, w: Math.min(w, cr.e + pad + 1) - x, h: Math.min(h, rr.e + pad + 1) - y };
 }
+function sharpenGray(g, w, h){
+  const out = new Uint8ClampedArray(g.length);
+  const a = 0.6;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const c = g[i];
+      const l = x > 0 ? g[i - 1] : c;
+      const r = x < w - 1 ? g[i + 1] : c;
+      const u = y > 0 ? g[i - w] : c;
+      const d = y < h - 1 ? g[i + w] : c;
+      let v = c * (1 + 4 * a) - a * (l + r + u + d);
+      out[i] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+  }
+  return out;
+}
+function stripLongRuns(bin, w, h){
+  const hLim = Math.max(50, Math.floor(w * 0.12));
+  for (let y = 0; y < h; y++) {
+    let x = 0;
+    while (x < w) {
+      if (bin[y * w + x] === 0) {
+        const s = x;
+        while (x < w && bin[y * w + x] === 0) x++;
+        if (x - s >= hLim) { for (let k = s; k < x; k++) bin[y * w + k] = 255; }
+      } else x++;
+    }
+  }
+  const vLim = Math.max(80, Math.floor(h * 0.35));
+  for (let x = 0; x < w; x++) {
+    let y = 0;
+    while (y < h) {
+      if (bin[y * w + x] === 0) {
+        const s = y;
+        while (y < h && bin[y * w + x] === 0) y++;
+        if (y - s >= vLim) { for (let k = s; k < y; k++) bin[k * w + x] = 255; }
+      } else y++;
+    }
+  }
+  return bin;
+}
 /* PURE-END */
 
 const KEY = "kozukaicho_2026_v2";
-const APP_VER = "1.7";
+const APP_VER = "1.8";
 const SNAP_KEY = KEY + "_prev";
 const META_KEY = KEY + "_meta";
 const COL = { ink:"#262420", inkSoft:"#6B6557", rule:"#D9D2C0", ai:"#31518F", aiSoft:"#E3E9F4", aiPale:"#A9B8D6", shu:"#C43D2B", asagi:"#4B93A3" };
@@ -1255,7 +1300,8 @@ async function preprocessReceipt(file){
   const cx = out.getContext("2d");
   cx.drawImage(cv, sx, sy, sw, sh, 0, 0, w, h);
   g = canvasGray(out);
-  const bin = adaptiveBinarize(g, w, h);
+  g = sharpenGray(g, w, h);
+  const bin = stripLongRuns(adaptiveBinarize(g, w, h), w, h);
   const im = cx.createImageData(w, h);
   for (let j = 0, i = 0; j < bin.length; j++, i += 4) {
     im.data[i] = im.data[i + 1] = im.data[i + 2] = bin[j];
