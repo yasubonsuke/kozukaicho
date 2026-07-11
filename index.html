@@ -378,29 +378,45 @@ function ocrNumsInLine(line){
   }
   return out;
 }
-const OCR_SKIP = /預|釣|現金|クレジ|カード|交通系|電子マネー|チャージ|ポイント|残高|税率|対象|タイショウ|値引|割引|TEL|電話|FAX|番号|会員|レジ|レシート|取引|N[oO][.:：]?\s*[0-9]|[0-9]{4}[\/年]|[0-9]{1,2}:[0-9]{2}/;
-const OCR_TOTAL = /([合台舎含倉会]\s*[計訂針斗]|ご?[請清]\s*求|お?買\s*上\s*げ?\s*計|総\s*額)/;
+const OCR_SKIP = /預|釣|現金|クレジ|カード|交通系|電子マネー|チャージ|ポイント|クーポン|残高|税率|対象|タイショウ|値引|割引|TEL|電話|FAX|番号|会員|レジ|レシート|取引|N[oO][.:：]?\s*[0-9]|[0-9]{4}[\/年]|[0-9]{1,2}:[0-9]{2}/;
+const OCR_TOTAL = /([合台舎含倉会]\s*[計訂針斗]|ご?[請清]\s*求|お?買\s*上\s*げ?\s*金?\s*[計額]|総\s*額|お?支\s*払\s*い?\s*金?\s*額|ご?利\s*用\s*金?\s*額|ご?購\s*入\s*金?\s*額|決\s*済\s*金?\s*額|^\s*[（(]?\s*領?収?\s*金\s*額)/;
 const OCR_SUB = /[小水]\s*[計訂]/;
+const OCR_PROMO = /ポイント|マイル|クーポン|以上|未満|ごとに|毎に|につき|進呈|贈呈|プレゼント|無料|割引券/;
 function fixKanji(s){
   return String(s).replace(/言\s*[十†]/g, "計");
+}
+function isTotalLine(l){
+  if (OCR_PROMO.test(l)) return false;
+  if (OCR_TOTAL.test(l)) return true;
+  return /TOTAL/i.test(l) && !/SUB\s*TOTAL/i.test(l);
+}
+function isSubLine(l){
+  if (OCR_PROMO.test(l)) return false;
+  return OCR_SUB.test(l) || /SUB\s*TOTAL/i.test(l);
+}
+function numsOnTotalLine(rawLine){
+  const l = fixKanji(ocrZenToHan(String(rawLine || "")));
+  if (OCR_PROMO.test(l)) return [];
+  const seg = l.split(/預|釣|点数|個数|現金/)[0];
+  return ocrNumsInLine(seg);
 }
 function parseReceiptText(text){
   const lines = String(text || "").split(/\r?\n/).map(l => fixKanji(ocrZenToHan(l)).trim()).filter(l => l.length > 0);
   let amount = 0;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
-    if (OCR_TOTAL.test(l) && !/預|釣|点数|個数/.test(l)) {
-      let ns = ocrNumsInLine(l);
-      if (ns.length === 0 && lines[i + 1] && !OCR_SKIP.test(lines[i + 1])) ns = ocrNumsInLine(lines[i + 1]);
+    if (isTotalLine(l)) {
+      let ns = numsOnTotalLine(l);
+      if (ns.length === 0 && lines[i + 1] && !OCR_SKIP.test(lines[i + 1])) ns = numsOnTotalLine(lines[i + 1]);
       if (ns.length) amount = ns[ns.length - 1];
     }
   }
   if (!amount) {
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
-      if (OCR_SUB.test(l) && !/点数|個数/.test(l)) {
-        let ns = ocrNumsInLine(l);
-        if (ns.length === 0 && lines[i + 1] && !OCR_SKIP.test(lines[i + 1])) ns = ocrNumsInLine(lines[i + 1]);
+      if (isSubLine(l)) {
+        let ns = numsOnTotalLine(l);
+        if (ns.length === 0 && lines[i + 1] && !OCR_SKIP.test(lines[i + 1])) ns = numsOnTotalLine(lines[i + 1]);
         if (ns.length) amount = ns[ns.length - 1];
       }
     }
@@ -485,18 +501,12 @@ function bestNumberFromDigits(text){
 function findTotalLineIndex(texts){
   const ls = texts.map(t => fixKanji(ocrZenToHan(String(t || ""))));
   let hit = null;
-  for (let i = 0; i < ls.length; i++) {
-    const l = ls[i];
-    if (OCR_TOTAL.test(l) && !/預|釣|点数|個数/.test(l)) hit = { i: i, sub: false };
-  }
+  for (let i = 0; i < ls.length; i++) if (isTotalLine(ls[i])) hit = { i: i, sub: false };
   if (hit) return hit;
-  for (let i = 0; i < ls.length; i++) {
-    const l = ls[i];
-    if (OCR_SUB.test(l) && !/点数|個数/.test(l)) hit = { i: i, sub: true };
-  }
+  for (let i = 0; i < ls.length; i++) if (isSubLine(ls[i])) hit = { i: i, sub: true };
   return hit;
 }
-function adaptiveBinarize(gray, w, h){
+function adaptiveBinarize(gray, w, h, winDiv){
   const W = w + 1;
   const integ = new Float64Array(W * (h + 1));
   for (let y = 0; y < h; y++) {
@@ -506,7 +516,7 @@ function adaptiveBinarize(gray, w, h){
       integ[(y + 1) * W + (x + 1)] = integ[y * W + (x + 1)] + rowSum;
     }
   }
-  let win = Math.round(w / 22);
+  let win = Math.round(w / (winDiv || 22));
   if (win < 15) win = 15;
   if (win > 61) win = 61;
   const r = win >> 1;
@@ -518,7 +528,7 @@ function adaptiveBinarize(gray, w, h){
       const area = (x1 - x0 + 1) * (y1 - y0 + 1);
       const sum = integ[(y1 + 1) * W + (x1 + 1)] - integ[y0 * W + (x1 + 1)]
         - integ[(y1 + 1) * W + x0] + integ[y0 * W + x0];
-      out[y * w + x] = gray[y * w + x] < (sum / area) * 0.90 ? 0 : 255;
+      out[y * w + x] = gray[y * w + x] < (sum / area) * 0.90 - 8 ? 0 : 255;
     }
   }
   return out;
@@ -562,7 +572,7 @@ function findBrightCrop(gray, w, h){
 }
 function sharpenGray(g, w, h){
   const out = new Uint8ClampedArray(g.length);
-  const a = 0.6;
+  const a = 0.35;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y * w + x;
@@ -602,10 +612,30 @@ function stripLongRuns(bin, w, h){
   }
   return bin;
 }
+function despeckle(bin, w, h){
+  const src = bin.slice();
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (src[i] !== 0) continue;
+      let nb = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue;
+          const yy = y + dy, xx = x + dx;
+          if (yy < 0 || yy >= h || xx < 0 || xx >= w) continue;
+          if (src[yy * w + xx] === 0) nb++;
+        }
+      }
+      if (nb <= 1) bin[i] = 255;
+    }
+  }
+  return bin;
+}
 /* PURE-END */
 
 const KEY = "kozukaicho_2026_v2";
-const APP_VER = "1.8";
+const APP_VER = "2.1";
 const SNAP_KEY = KEY + "_prev";
 const META_KEY = KEY + "_meta";
 const COL = { ink:"#262420", inkSoft:"#6B6557", rule:"#D9D2C0", ai:"#31518F", aiSoft:"#E3E9F4", aiPale:"#A9B8D6", shu:"#C43D2B", asagi:"#4B93A3" };
@@ -1015,7 +1045,7 @@ function modalHTML(){
     '<p>・行そのものをタップすると明細の一覧が開きます。記録をタップすれば金額・メモの修正や削除ができます。</p>'+
     '<p>・メモ欄の下には同じ分類で最近使ったメモが出るので、タップするだけで入力できます。</p>'+
     '<p>・グラフは1回タップするとその月・週の金額が下に表示され、同じ場所をもう一度タップすると入力画面へ進みます。</p>'+
-    '<p>・追加画面の「📷 レシート読取」でレシートを撮ると、合計金額・店名・日付を自動で読み取ります（処理はすべて端末内・初回のみ約15MBの取得に通信が必要）。日付が今の週や月と違うときは、記録先の変更をワンタップで提案します。読み取りは完璧ではないので、確定前に確認してください。</p>'+
+    '<p>・追加画面の「📷 レシート読取」でレシートを撮ると、合計金額と日付を自動で読み取ります（処理はすべて端末内・初回のみ約15MBの取得に通信が必要）。日付が今の週や月と違うときは、記録先の変更をワンタップで提案します。読み取りは完璧ではないので、確定前に確認してください。</p>'+
     '<p>・「週の支出」は画面を左右にスワイプすると週を移動できます（月をまたいで連続）。「生活費」「収入」のスワイプは月の移動です。</p>'+
     '<p>・データはこの端末（このアプリ）の中に自動保存されます。機種変更などに備えて、ときどき「書き出す」でバックアップを取っておくと安心です。</p>'+
     '<div class="io-sec"><div class="io-title">データの引き継ぎ・バックアップ</div>'+
@@ -1283,15 +1313,15 @@ function canvasGray(cv){
   }
   return g;
 }
-async function preprocessReceipt(file){
+async function preprocessReceipt(file, winDiv, targetW){
   const cv = await loadImageCanvas(file, 2600);
   let g = canvasGray(cv);
   const crop = findBrightCrop(g, cv.width, cv.height);
   let sx = 0, sy = 0, sw = cv.width, sh = cv.height;
   if (crop) { sx = crop.x; sy = crop.y; sw = crop.w; sh = crop.h; }
-  const targetW = 1150;
-  let scale = targetW / sw;
-  if (sh * scale > 3200) scale = 3200 / sh;
+  const tw = targetW || 1150;
+  let scale = tw / sw;
+  if (sh * scale > 3600) scale = 3600 / sh;
   if (scale > 2) scale = 2;
   const w = Math.max(1, Math.round(sw * scale));
   const h = Math.max(1, Math.round(sh * scale));
@@ -1301,7 +1331,7 @@ async function preprocessReceipt(file){
   cx.drawImage(cv, sx, sy, sw, sh, 0, 0, w, h);
   g = canvasGray(out);
   g = sharpenGray(g, w, h);
-  const bin = stripLongRuns(adaptiveBinarize(g, w, h), w, h);
+  const bin = despeckle(stripLongRuns(adaptiveBinarize(g, w, h, winDiv), w, h), w, h);
   const im = cx.createImageData(w, h);
   for (let j = 0, i = 0; j < bin.length; j++, i += 4) {
     im.data[i] = im.data[i + 1] = im.data[i + 2] = bin[j];
@@ -1310,24 +1340,22 @@ async function preprocessReceipt(file){
   cx.putImageData(im, 0, 0);
   return out;
 }
-async function runOcr(file){
-  if (!st.panel || st.panel.mode !== "calc") return;
-  const token = ++ocrToken;
-  st.ocr = { busy: true, msg: "写真を準備中…" };
-  renderPanel();
-  try {
-    const cv = await preprocessReceipt(file);
-    if (token !== ocrToken) return;
-    const worker = await getOcrWorker();
-    if (token !== ocrToken) return;
-    ocrStatus("解析中…");
-    const r = await worker.recognize(cv);
-    if (token !== ocrToken || !st.panel || st.panel.mode !== "calc") return;
-    const txt = r && r.data ? r.data.text : "";
-    const lines = (r && r.data && r.data.lines) ? r.data.lines : [];
-    let amount = 0;
-    const hit = findTotalLineIndex(lines.map(l => l.text));
-    if (hit && lines[hit.i] && lines[hit.i].bbox) {
+async function ocrExtract(worker, cv, token){
+  ocrStatus("解析中…");
+  const r = await worker.recognize(cv);
+  if (token !== ocrToken) return { txt: "", amount: 0 };
+  const txt = r && r.data ? r.data.text : "";
+  const lines = (r && r.data && r.data.lines) ? r.data.lines : [];
+  let amount = 0;
+  const texts = lines.map(l => ((l.confidence == null || l.confidence >= 35) ? l.text : ""));
+  const hit = findTotalLineIndex(texts);
+  if (hit && lines[hit.i]) {
+    const lineNums = numsOnTotalLine(lines[hit.i].text);
+    const nextNums = lines[hit.i + 1] ? numsOnTotalLine(lines[hit.i + 1].text) : [];
+    const passNums = lineNums.length ? lineNums : nextNums;
+    if (passNums.length) {
+      amount = Math.max.apply(null, passNums);
+    } else if (lines[hit.i].bbox) {
       try {
         ocrStatus("合計を精読中…");
         await worker.setParameters({ tessedit_char_whitelist: "0123456789,.-¥", tessedit_pageseg_mode: "7" });
@@ -1351,6 +1379,39 @@ async function runOcr(file){
         try { await worker.setParameters({ tessedit_char_whitelist: "", tessedit_pageseg_mode: "4" }); } catch (e3) { /* noop */ }
       }
     }
+  }
+  return { txt: txt, amount: amount };
+}
+async function runOcr(file){
+  if (!st.panel || st.panel.mode !== "calc") return;
+  const token = ++ocrToken;
+  st.ocr = { busy: true, msg: "写真を準備中…" };
+  renderPanel();
+  try {
+    const cv = await preprocessReceipt(file);
+    if (token !== ocrToken) return;
+    const worker = await getOcrWorker();
+    if (token !== ocrToken) return;
+    let res = await ocrExtract(worker, cv, token);
+    if (token !== ocrToken || !st.panel || st.panel.mode !== "calc") return;
+    if (!res.amount) {
+      ocrStatus("別方式で再解析中…");
+      const cv2 = await preprocessReceipt(file, 32);
+      if (token !== ocrToken) return;
+      const res2 = await ocrExtract(worker, cv2, token);
+      if (token !== ocrToken || !st.panel || st.panel.mode !== "calc") return;
+      if (res2.amount > 0 || (!res.txt.trim() && res2.txt.trim())) res = res2;
+    }
+    if (!res.amount) {
+      ocrStatus("高精細で再解析中…");
+      const cv3 = await preprocessReceipt(file, 22, 1400);
+      if (token !== ocrToken) return;
+      const res3 = await ocrExtract(worker, cv3, token);
+      if (token !== ocrToken || !st.panel || st.panel.mode !== "calc") return;
+      if (res3.amount > 0 || (!res.txt.trim() && res3.txt.trim())) res = res3;
+    }
+    const txt = res.txt;
+    let amount = res.amount;
     if (token !== ocrToken || !st.panel || st.panel.mode !== "calc") return;
     const parsed = parseReceiptText(txt);
     if (amount > 0) parsed.amount = clampNum(amount);
@@ -1361,7 +1422,6 @@ async function runOcr(file){
       st.panel.acc = null;
       st.panel.op = null;
     }
-    if (parsed.store && !st.panel.memo.trim()) st.panel.memo = parsed.store;
     if (pd) st.panel.ocrDate = pd.iso;
     let move = null;
     if (pd && st.panel.edit == null) {
@@ -1380,7 +1440,7 @@ async function runOcr(file){
       busy: false,
       move: move,
       msg: parsed.amount > 0
-        ? "読み取り: ¥" + fmtN(parsed.amount) + (parsed.store ? "／" + parsed.store : "") + dstr + "　違っていたら直してください"
+        ? "読み取り: ¥" + fmtN(parsed.amount) + dstr + "　違っていたら直してください"
         : "金額を読み取れませんでした。手で入力してください" + dstr
     };
     renderPanel();
